@@ -16,6 +16,7 @@ typedef ULONG PROPID;
 #include <commctrl.h>
 #include <shlobj.h>
 #include <commdlg.h>
+#include <shellapi.h>
 #include <dwmapi.h>
 #include <tlhelp32.h>
 #include <string>
@@ -37,30 +38,30 @@ namespace fs = std::filesystem;
 
 #define IDI_APPICON 101
 
-#define APP_VERSION L"1.0.0"
+#define APP_VERSION L"1.1.0"
+
+enum class Theme { Dark, Light };
 
 namespace Colors
 {
-    inline Gdiplus::Color BgDark()      { return Gdiplus::Color(255, 8, 14, 12); }
-    inline Gdiplus::Color BgPanel()     { return Gdiplus::Color(255, 12, 20, 17); }
-    inline Gdiplus::Color BgTitle()     { return Gdiplus::Color(255, 6, 12, 10); }
-    inline Gdiplus::Color BgCard()      { return Gdiplus::Color(255, 18, 30, 25); }
-    inline Gdiplus::Color BgHover()     { return Gdiplus::Color(255, 22, 38, 32); }
+    extern Theme currentTheme;
 
-    inline Gdiplus::Color Accent()      { return Gdiplus::Color(255, 46, 222, 162); }
-    inline Gdiplus::Color AccentHover() { return Gdiplus::Color(255, 80, 240, 180); }
-    inline Gdiplus::Color AccentBright(){ return Gdiplus::Color(255, 120, 255, 200); }
-    inline Gdiplus::Color AccentDeep()  { return Gdiplus::Color(255, 28, 180, 130); }
-
-    inline Gdiplus::Color Success()     { return Gdiplus::Color(255, 46, 222, 162); }
-    inline Gdiplus::Color Danger()      { return Gdiplus::Color(255, 248, 113, 113); }
-    inline Gdiplus::Color Warning()     { return Gdiplus::Color(255, 251, 191, 36); }
-
-    inline Gdiplus::Color Text()        { return Gdiplus::Color(255, 230, 250, 240); }
-    inline Gdiplus::Color TextDim()     { return Gdiplus::Color(255, 120, 145, 130); }
-    inline Gdiplus::Color TextMuted()   { return Gdiplus::Color(255, 80, 100, 90); }
-
-    inline Gdiplus::Color Border()      { return Gdiplus::Color(255, 30, 50, 42); }
+    Gdiplus::Color BgDark();
+    Gdiplus::Color BgPanel();
+    Gdiplus::Color BgTitle();
+    Gdiplus::Color BgCard();
+    Gdiplus::Color BgHover();
+    Gdiplus::Color Accent();
+    Gdiplus::Color AccentHover();
+    Gdiplus::Color AccentBright();
+    Gdiplus::Color AccentDeep();
+    Gdiplus::Color Success();
+    Gdiplus::Color Danger();
+    Gdiplus::Color Warning();
+    Gdiplus::Color Text();
+    Gdiplus::Color TextDim();
+    Gdiplus::Color TextMuted();
+    Gdiplus::Color Border();
 }
 
 enum class IntroPhase
@@ -83,6 +84,15 @@ enum class IPSetMode
     None,
     Any
 }; 
+
+enum class DnsMode
+{
+    System,
+    Cloudflare,
+    Google,
+    Quad9,
+    AdGuard
+};
 
 enum class TestResult
 {
@@ -128,6 +138,8 @@ struct SettingsState
     bool startMinimized = false;
     GameFilterMode gameFilter = GameFilterMode::Disabled;
     IPSetMode ipsetMode = IPSetMode::Loaded;
+    Theme theme = Theme::Dark;
+    DnsMode dnsMode = DnsMode::System;
 };
 
 class ZapretGUI
@@ -144,6 +156,7 @@ private:
     HWND m_hSettingsWnd = nullptr;
     ULONG_PTR m_gdiplusToken;
     HICON m_hAppIcon = nullptr;
+    HICON m_hTrayIconSmall = nullptr;
     Gdiplus::Bitmap* m_logoBitmap = nullptr;
 
     bool m_introActive = true;
@@ -185,6 +198,9 @@ private:
 
     HANDLE m_processHandle = nullptr;
 
+    std::chrono::steady_clock::time_point m_sessionStart;
+    bool m_sessionActive = false;
+
     int m_settingsScroll = 0;
     int m_settingsHoveredItem = -1;
     bool m_settingsCloseHovered = false;
@@ -208,6 +224,27 @@ private:
     bool m_testCancelHovered = false;
     bool m_testExportHovered = false;
     int m_testSortMode = 0;
+
+    HWND m_hListsWnd = nullptr;
+    int m_listsCurrentFile = 0;
+    std::vector<std::wstring> m_listsFileNames;
+    std::wstring m_listsContent;
+    int m_listsScroll = 0;
+    bool m_listsCloseHovered = false;
+    bool m_listsSaveHovered = false;
+    bool m_listsReloadHovered = false;
+    int m_listsHoveredTab = -1;
+    HWND m_hListsEdit = nullptr;
+    NOTIFYICONDATAW m_trayIcon = {};
+    bool m_trayCreated = false;
+    bool m_wasConnectedNotified = false;
+
+    HWND m_hTrayMenuWnd = nullptr;
+    int m_trayMenuHovered = -1;
+    HWND m_hStrategyPickerWnd = nullptr;
+    int m_strategyPickerHovered = -1;
+    int m_strategyPickerScroll = 0;
+    bool m_strategyPickerCloseHovered = false;
 
     const int SIDEBAR_W   = 290;
     const int TITLEBAR_H  = 36;
@@ -297,6 +334,45 @@ private:
     bool TestDomain(const std::wstring& domain, int& pingMs);
     std::wstring ResultToString(TestResult r);
     void ExportTestResults();
+
+    void OpenListsEditor();
+    static LRESULT CALLBACK ListsWndProc(HWND, UINT, WPARAM, LPARAM);
+    LRESULT HandleListsMessage(UINT msg, WPARAM wParam, LPARAM lParam);
+    void DrawListsWindow(HDC hdc, int w, int h);
+    void OnListsClick(int x, int y);
+    void OnListsMouseMove(int x, int y);
+    void LoadListsFile(int index);
+    void SaveListsFile();
+    void ScanListsFiles();
+
+    void CreateTrayIcon();
+    void RemoveTrayIcon();
+    void UpdateTrayIcon();
+    void ShowNotification(const std::wstring& title, const std::wstring& text);
+    void ShowTrayMenu();
+    void OnTrayMessage(WPARAM wParam, LPARAM lParam);
+
+    void ShowCustomTrayMenu();
+    static LRESULT CALLBACK TrayMenuWndProc(HWND, UINT, WPARAM, LPARAM);
+    LRESULT HandleTrayMenuMessage(UINT msg, WPARAM wParam, LPARAM lParam);
+    void DrawTrayMenu(HDC hdc, int w, int h);
+
+    void OpenStrategyPicker();
+    static LRESULT CALLBACK StrategyPickerWndProc(HWND, UINT, WPARAM, LPARAM);
+    LRESULT HandleStrategyPickerMessage(UINT msg, WPARAM wParam, LPARAM lParam);
+    void DrawStrategyPicker(HDC hdc, int w, int h);
+
+    void CheckForUpdates(bool silent);
+    void CheckUpdatesThread(bool silent);
+    void ApplyDnsMode();
+    void RestoreSystemDns();
+    std::wstring GetDnsServers(DnsMode mode);
+    std::wstring GetDnsModeName(DnsMode mode);
+    bool RunPowerShellCommand(const std::wstring& cmd);
+    std::thread m_updateThread;
+    bool m_updateAvailable = false;
+    std::wstring m_latestVersion;
+    std::wstring m_updateUrl;
 
     void SetAutoStart(bool enable);
     bool IsAutoStartEnabled();

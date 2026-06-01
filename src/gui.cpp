@@ -6,12 +6,89 @@
 using std::min;
 using std::max;
 
+#define WM_TRAY_ICON (WM_USER + 1)
+#define TRAY_ID_SHOW    2001
+#define TRAY_ID_CONNECT 2002
+#define TRAY_ID_EXIT    2003
+
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "ole32.lib")
+
+namespace Colors
+{
+    Theme currentTheme = Theme::Dark;
+
+    Gdiplus::Color BgDark()
+    {
+        return currentTheme == Theme::Dark
+            ? Gdiplus::Color(255, 8, 14, 12)
+            : Gdiplus::Color(255, 240, 245, 242);
+    }
+    Gdiplus::Color BgPanel()
+    {
+        return currentTheme == Theme::Dark
+            ? Gdiplus::Color(255, 12, 20, 17)
+            : Gdiplus::Color(255, 230, 240, 234);
+    }
+    Gdiplus::Color BgTitle()
+    {
+        return currentTheme == Theme::Dark
+            ? Gdiplus::Color(255, 6, 12, 10)
+            : Gdiplus::Color(255, 220, 232, 225);
+    }
+    Gdiplus::Color BgCard()
+    {
+        return currentTheme == Theme::Dark
+            ? Gdiplus::Color(255, 18, 30, 25)
+            : Gdiplus::Color(255, 250, 253, 251);
+    }
+    Gdiplus::Color BgHover()
+    {
+        return currentTheme == Theme::Dark
+            ? Gdiplus::Color(255, 22, 38, 32)
+            : Gdiplus::Color(255, 220, 240, 230);
+    }
+    Gdiplus::Color Accent()      { return Gdiplus::Color(255, 46, 222, 162); }
+    Gdiplus::Color AccentHover() { return Gdiplus::Color(255, 80, 240, 180); }
+    Gdiplus::Color AccentBright(){ return Gdiplus::Color(255, 120, 255, 200); }
+    Gdiplus::Color AccentDeep()
+    {
+        return currentTheme == Theme::Dark
+            ? Gdiplus::Color(255, 28, 180, 130)
+            : Gdiplus::Color(255, 20, 160, 110);
+    }
+    Gdiplus::Color Success()     { return Gdiplus::Color(255, 46, 222, 162); }
+    Gdiplus::Color Danger()      { return Gdiplus::Color(255, 248, 113, 113); }
+    Gdiplus::Color Warning()     { return Gdiplus::Color(255, 251, 191, 36); }
+    Gdiplus::Color Text()
+    {
+        return currentTheme == Theme::Dark
+            ? Gdiplus::Color(255, 230, 250, 240)
+            : Gdiplus::Color(255, 20, 30, 25);
+    }
+    Gdiplus::Color TextDim()
+    {
+        return currentTheme == Theme::Dark
+            ? Gdiplus::Color(255, 120, 145, 130)
+            : Gdiplus::Color(255, 100, 120, 110);
+    }
+    Gdiplus::Color TextMuted()
+    {
+        return currentTheme == Theme::Dark
+            ? Gdiplus::Color(255, 80, 100, 90)
+            : Gdiplus::Color(255, 150, 165, 158);
+    }
+    Gdiplus::Color Border()
+    {
+        return currentTheme == Theme::Dark
+            ? Gdiplus::Color(255, 30, 50, 42)
+            : Gdiplus::Color(255, 200, 215, 208);
+    }
+}
 
 ZapretGUI::ZapretGUI(HINSTANCE hInstance) : m_hInstance(hInstance)
 {
@@ -24,6 +101,10 @@ ZapretGUI::ZapretGUI(HINSTANCE hInstance) : m_hInstance(hInstance)
     m_hAppIcon = (HICON)LoadImage(hInstance, MAKEINTRESOURCE(IDI_APPICON),
                                     IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
 
+    m_hTrayIconSmall = (HICON)LoadImage(hInstance, MAKEINTRESOURCE(IDI_APPICON),
+                                    IMAGE_ICON, 16, 16, LR_SHARED);
+    if (!m_hTrayIconSmall) m_hTrayIconSmall = m_hAppIcon;
+
     wchar_t exePath[MAX_PATH];
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     m_zapretPath = fs::path(exePath).parent_path();
@@ -32,6 +113,7 @@ ZapretGUI::ZapretGUI(HINSTANCE hInstance) : m_hInstance(hInstance)
 
     LoadLogoBitmap();
     LoadConfig();
+    Colors::currentTheme = m_settings.theme;
     DetectZapretPaths();
     ApplyGameFilterMode();
     if (m_pathsValid) m_settings.ipsetMode = DetectIPSetMode();
@@ -47,6 +129,11 @@ ZapretGUI::~ZapretGUI()
     if (m_testThread.joinable())
     {
         m_testThread.join();
+    }
+
+    if (m_updateThread.joinable())
+    {
+        m_updateThread.join();
     }
 
     m_wasConnected = IsWinwsRunning();
@@ -92,6 +179,12 @@ int ZapretGUI::Run(int nCmdShow)
     {
         CreateIntroWindow();
     }
+
+    std::thread updateCheckThread([this]() {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        CheckForUpdates(true);
+    });
+    updateCheckThread.detach();
 
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0))
@@ -444,6 +537,8 @@ void ZapretGUI::CreateMainWindow(int nCmdShow)
 
     ShowWindow(m_hWnd, nCmdShow);
     UpdateWindow(m_hWnd);
+
+    CreateTrayIcon();
 }
 
 LRESULT CALLBACK ZapretGUI::WndProc(HWND hWnd, UINT msg, WPARAM w, LPARAM l)
@@ -475,8 +570,27 @@ LRESULT ZapretGUI::HandleMessage(UINT msg, WPARAM w, LPARAM l)
     case WM_MOUSEWHEEL:
     {
         POINT pt = { GET_X_LPARAM(l), GET_Y_LPARAM(l) };
-        ScreenToClient(m_hWnd, &pt);
-        OnMouseWheel(GET_WHEEL_DELTA_WPARAM(w), pt.x, pt.y);
+        ScreenToClient(m_hListsWnd, &pt);
+
+        RECT cr; GetClientRect(m_hListsWnd, &cr);
+
+        if (pt.y >= 55 && pt.y <= 95)
+        {
+            int delta = GET_WHEEL_DELTA_WPARAM(w);
+            m_listsScroll += (delta > 0) ? 60 : -60;
+
+            int totalW = 20;
+            for (auto& n : m_listsFileNames)
+                totalW += (int)n.length() * 8 + 24 + 4;
+
+            int viewW = cr.right - 40;
+            int maxScroll = (totalW > viewW) ? -(totalW - viewW) : 0;
+
+            if (m_listsScroll > 0) m_listsScroll = 0;
+            if (m_listsScroll < maxScroll) m_listsScroll = maxScroll;
+
+            InvalidateRect(m_hListsWnd, nullptr, FALSE);
+        }
         return 0;
     }
     case WM_TIMER:
@@ -501,7 +615,16 @@ LRESULT ZapretGUI::HandleMessage(UINT msg, WPARAM w, LPARAM l)
         return 0;
     }
     case WM_NCLBUTTONDBLCLK: if (w == HTCAPTION) { ToggleMaximize(); return 0; } break;
+    case WM_TRAY_ICON:
+        OnTrayMessage(w, l);
+        return 0;
+
+    case WM_CLOSE:
+        ShowWindow(m_hWnd, SW_HIDE);
+        return 0;
+
     case WM_DESTROY:
+        RemoveTrayIcon();
         if (m_animTimer) KillTimer(m_hWnd, m_animTimer);
         if (m_processCheckTimer) KillTimer(m_hWnd, m_processCheckTimer);
         PostQuitMessage(0);
@@ -821,6 +944,41 @@ void ZapretGUI::DrawCenter(Gdiplus::Graphics& g, int w, int h)
         Gdiplus::Font itFont(&ff, 11, Gdiplus::FontStyleItalic);
         Gdiplus::RectF tr((float)(cx - 250), (float)(cy + radius + 68), 500, 25);
         g.DrawString(L"\u2192  \u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0441\u0442\u0440\u0430\u0442\u0435\u0433\u0438\u044E \u0441\u043F\u0440\u0430\u0432\u0430", -1, &itFont, tr, &sf, &dimBrush);
+    }
+
+        if (m_connected && m_sessionActive)
+    {
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_sessionStart).count();
+
+        int hours = (int)(elapsed / 3600);
+        int minutes = (int)((elapsed % 3600) / 60);
+        int seconds = (int)(elapsed % 60);
+
+        wchar_t timeBuf[32];
+        swprintf(timeBuf, 32, L"%02d:%02d:%02d", hours, minutes, seconds);
+
+        Gdiplus::Font timerFont(&ff, 28, Gdiplus::FontStyleBold);
+
+        for (int i = 2; i >= 1; i--)
+        {
+            Gdiplus::SolidBrush tg(Gdiplus::Color(15 * i, 46, 222, 162));
+            for (int d = 0; d < 4; d++)
+            {
+                float a = d * 3.14159f / 2.0f;
+                Gdiplus::RectF tr((float)(cx - 100 + cosf(a) * i), (float)(cy + radius + 95 + sinf(a) * i), 200, 40);
+                g.DrawString(timeBuf, -1, &timerFont, tr, &sf, &tg);
+            }
+        }
+
+        Gdiplus::SolidBrush timerBrush(Colors::Accent());
+        Gdiplus::RectF timerRect((float)(cx - 100), (float)(cy + radius + 95), 200, 40);
+        g.DrawString(timeBuf, -1, &timerFont, timerRect, &sf, &timerBrush);
+
+        Gdiplus::Font labelFont(&ff, 8, Gdiplus::FontStyleRegular);
+        Gdiplus::SolidBrush labelBrush(Colors::TextDim());
+        Gdiplus::RectF labelRect((float)(cx - 100), (float)(cy + radius + 130), 200, 20);
+        g.DrawString(L"\u0412\u0440\u0435\u043C\u044F \u0441\u0435\u0441\u0441\u0438\u0438", -1, &labelFont, labelRect, &sf, &labelBrush);
     }
 }
 
@@ -1191,12 +1349,22 @@ void ZapretGUI::OnMouseUp(int x, int y)
     if (m_folderBtnHovered) { SelectFolder(); return; }
     if (m_hoveredBatIndex >= 0 && m_hoveredBatIndex < (int)m_strategies.size())
     {
+        bool wasConnected = m_connected;
         m_selectedBatIndex = m_hoveredBatIndex;
         try { SaveConfig(); } catch (...) {}
+
+        if (wasConnected)
+        {
+            StopWinws();
+            StartWinws(m_strategies[m_selectedBatIndex]);
+            m_sessionStart = std::chrono::steady_clock::now();
+            m_sessionActive = true;
+            m_connected = true;
+        }
+
         InvalidateRect(m_hWnd, nullptr, FALSE);
     }
 }
-
 void ZapretGUI::OnMouseWheel(int delta, int x, int y)
 {
     RECT cr; GetClientRect(m_hWnd, &cr);
@@ -1342,9 +1510,13 @@ void ZapretGUI::Connect()
     StopWinws();
     StartWinws(m_strategies[m_selectedBatIndex]);
     m_wasConnected = true;
+    m_sessionStart = std::chrono::steady_clock::now();
+    m_sessionActive = true;
+    m_connected = true;
     SaveConfig();
     InvalidateRect(m_hWnd, nullptr, FALSE);
 }
+
 
 void ZapretGUI::Disconnect()
 {
@@ -1459,7 +1631,29 @@ void ZapretGUI::CheckConnectionStatus()
     if (actuallyRunning != m_connected)
     {
         m_connected = actuallyRunning;
-        if (m_connected) m_pulseAnim = 0;
+        if (m_connected)
+        {
+            m_pulseAnim = 0;
+            if (!m_sessionActive)
+            {
+                m_sessionStart = std::chrono::steady_clock::now();
+                m_sessionActive = true;
+            }
+
+            if (m_selectedBatIndex >= 0 && m_selectedBatIndex < (int)m_strategies.size())
+            {
+                ShowNotification(L"Zapret Gui",
+                    L"\u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u043E \u0447\u0435\u0440\u0435\u0437: " +
+                    m_strategies[m_selectedBatIndex].displayName);
+            }
+        }
+        else
+        {
+            m_sessionActive = false;
+            ShowNotification(L"Zapret Gui",
+                L"\u041E\u0442\u043A\u043B\u044E\u0447\u0435\u043D\u043E");
+        }
+        UpdateTrayIcon();
         InvalidateRect(m_hWnd, nullptr, FALSE);
     }
 }
@@ -1503,6 +1697,7 @@ void ZapretGUI::SaveConfig()
         f << L"AutoConnect=" << (m_settings.autoConnect ? 1 : 0) << L"\n";
         f << L"StartMinimized=" << (m_settings.startMinimized ? 1 : 0) << L"\n";
         f << L"WasConnected=" << (m_wasConnected ? 1 : 0) << L"\n";
+        f << L"Theme=" << (int)m_settings.theme << L"\n";
         f.close();
     }
     catch (...) {}
@@ -1544,6 +1739,12 @@ void ZapretGUI::LoadConfig()
         else if (key == L"AutoConnect") m_settings.autoConnect = (_wtoi(val.c_str()) == 1);
         else if (key == L"StartMinimized") m_settings.startMinimized = (_wtoi(val.c_str()) == 1);
         else if (key == L"WasConnected") m_wasConnected = (_wtoi(val.c_str()) == 1);
+
+        else if (key == L"Theme")
+        {
+            int t = _wtoi(val.c_str());
+            if (t == 0 || t == 1) m_settings.theme = (Theme)t;
+        }
     }
     f.close();
 
@@ -1667,7 +1868,7 @@ LRESULT CALLBACK ZapretGUI::SettingsWndProc(HWND hWnd, UINT msg, WPARAM w, LPARA
 
 int ZapretGUI::GetSettingsContentHeight()
 {
-    return 11 * 70 + 60;
+    return 14 * 70 + 60;
 }
 
 int ZapretGUI::GetSettingsItemAt(int x, int y)
@@ -1681,7 +1882,7 @@ int ZapretGUI::GetSettingsItemAt(int x, int y)
 
     int rel = y - contentY - m_settingsScroll;
     int idx = rel / 70;
-    if (idx >= 0 && idx < 11) return idx;
+    if (idx >= 0 && idx < 14) return idx;
     return -1;
 }
 
@@ -1852,21 +2053,39 @@ void ZapretGUI::OnSettingsClick(int x, int y)
         }
         break;
     case 5:
-        UpdateHostsFile();
+        m_settings.dnsMode = (DnsMode)(((int)m_settings.dnsMode + 1) % 5);
+        ApplyDnsMode();
+        SaveConfig();
         break;
     case 6:
         OpenTestWindow();
         break;
     case 7:
-        OpenConfigFile();
+        OpenTestWindow();
         break;
     case 8:
-        SelectFolder();
+        OpenListsEditor();
         break;
     case 9:
-        OpenGitHub();
+        m_settings.theme = (m_settings.theme == Theme::Dark) ? Theme::Light : Theme::Dark;
+        Colors::currentTheme = m_settings.theme;
+        SaveConfig();
+        InvalidateRect(m_hWnd, nullptr, FALSE);
+        if (m_hSettingsWnd) InvalidateRect(m_hSettingsWnd, nullptr, FALSE);
         break;
     case 10:
+        OpenConfigFile();
+        break;
+    case 11:
+        SelectFolder();
+        break;
+    case 12:
+        OpenGitHub();
+        break;
+    case 13:
+        CheckForUpdates(false);
+        break;
+    case 14:
     {
         std::wstring info = L"Zapret Gui v";
         info += APP_VERSION;
@@ -1946,7 +2165,11 @@ void ZapretGUI::DrawSettingsWindow(HDC hdc, int w, int h)
     case IPSetMode::Any: ipText = L"any"; break;
     }
 
-    Item items[11] = {
+    std::wstring dnsText = GetDnsModeName(m_settings.dnsMode);
+    std::wstring themeText = (m_settings.theme == Theme::Dark)
+        ? L"\u0422\u0451\u043C\u043D\u0430\u044F" : L"\u0421\u0432\u0435\u0442\u043B\u0430\u044F";
+
+    Item items[15] = {
         { L"\u0410\u0432\u0442\u043E\u0437\u0430\u043F\u0443\u0441\u043A \u0441 Windows",
           L"\u0417\u0430\u043F\u0443\u0441\u043A\u0430\u0442\u044C \u043F\u0440\u0438 \u0432\u0445\u043E\u0434\u0435 \u0432 \u0441\u0438\u0441\u0442\u0435\u043C\u0443",
           L"", 0 },
@@ -1962,12 +2185,21 @@ void ZapretGUI::DrawSettingsWindow(HDC hdc, int w, int h)
         { L"IPSet \u0444\u0438\u043B\u044C\u0442\u0440",
           L"\u0420\u0435\u0436\u0438\u043C \u0440\u0430\u0431\u043E\u0442\u044B ipset-all.txt",
           ipText, 1 },
+        { L"DNS \u0441\u0435\u0440\u0432\u0435\u0440",
+          L"\u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C DNS \u0434\u043B\u044F \u0432\u0441\u0435\u0445 \u0430\u0434\u0430\u043F\u0442\u0435\u0440\u043E\u0432",
+          dnsText, 1 },
         { L"\u041E\u0431\u043D\u043E\u0432\u0438\u0442\u044C hosts \u0438 ipset",
           L"\u0421\u043A\u0430\u0447\u0430\u0442\u044C \u0430\u043A\u0442\u0443\u0430\u043B\u044C\u043D\u044B\u0435 \u0441\u043F\u0438\u0441\u043A\u0438 + \u0432 \u0431\u0443\u0444\u0435\u0440",
           L"", 2 },
         { L"\u0422\u0435\u0441\u0442 \u0441\u0442\u0440\u0430\u0442\u0435\u0433\u0438\u0439",
           L"\u041F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C \u0432\u0441\u0435 \u0441\u0442\u0440\u0430\u0442\u0435\u0433\u0438\u0438 \u043F\u043E \u0434\u043E\u043C\u0435\u043D\u0430\u043C",
           L"", 2 },
+        { L"\u0420\u0435\u0434\u0430\u043A\u0442\u043E\u0440 \u0441\u043F\u0438\u0441\u043A\u043E\u0432",
+          L"\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0444\u0430\u0439\u043B\u044B \u0438\u0437 lists/",
+          L"", 2 },
+        { L"\u0422\u0435\u043C\u0430 \u043E\u0444\u043E\u0440\u043C\u043B\u0435\u043D\u0438\u044F",
+          L"\u041F\u0435\u0440\u0435\u043A\u043B\u044E\u0447\u0438\u0442\u044C \u043C\u0435\u0436\u0434\u0443 \u0442\u0451\u043C\u043D\u043E\u0439 \u0438 \u0441\u0432\u0435\u0442\u043B\u043E\u0439 \u0442\u0435\u043C\u043E\u0439",
+          themeText, 1 },
         { L"\u041E\u0442\u043A\u0440\u044B\u0442\u044C config.ini",
           L"\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0444\u0430\u0439\u043B \u043D\u0430\u0441\u0442\u0440\u043E\u0435\u043A",
           L"", 2 },
@@ -1976,6 +2208,9 @@ void ZapretGUI::DrawSettingsWindow(HDC hdc, int w, int h)
           L"", 2 },
         { L"\u0418\u0441\u0445\u043E\u0434\u043D\u0438\u043A Zapret",
           L"\u041E\u0442\u043A\u0440\u044B\u0442\u044C GitHub \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439",
+          L"", 2 },
+        { L"\u041F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C \u043E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u044F",
+          L"\u0421\u0440\u0430\u0432\u043D\u0438\u0442\u044C \u0441 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0439 \u0432\u0435\u0440\u0441\u0438\u0435\u0439 \u043D\u0430 GitHub",
           L"", 2 },
         { L"\u041E \u043F\u0440\u043E\u0433\u0440\u0430\u043C\u043C\u0435",
           L"\u0412\u0435\u0440\u0441\u0438\u044F \u0438 \u0438\u043D\u0444\u043E\u0440\u043C\u0430\u0446\u0438\u044F",
@@ -1986,7 +2221,7 @@ void ZapretGUI::DrawSettingsWindow(HDC hdc, int w, int h)
     Gdiplus::Font descFont(&ff, 9, Gdiplus::FontStyleRegular);
     Gdiplus::Font valFont(&ff, 10, Gdiplus::FontStyleBold);
 
-    for (int i = 0; i < 11; i++)
+    for (int i = 0; i < 15; i++)
     {
         int y = contentY + i * 70 + m_settingsScroll;
         if (y + 60 < contentY || y > contentBottom) continue;
@@ -3336,4 +3571,1176 @@ void ZapretGUI::ExportTestResults()
 
     MessageBoxW(m_hTestWnd, L"\u0420\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u044B \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u044B.",
         L"Zapret Gui", MB_ICONINFORMATION);
+}
+
+void ZapretGUI::ScanListsFiles()
+{
+    m_listsFileNames.clear();
+    if (!m_pathsValid) return;
+
+    try
+    {
+        for (auto& entry : fs::directory_iterator(m_listsPath))
+        {
+            if (!entry.is_regular_file()) continue;
+            auto ext = entry.path().extension().wstring();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+            if (ext != L".txt") continue;
+
+            m_listsFileNames.push_back(entry.path().filename().wstring());
+        }
+        std::sort(m_listsFileNames.begin(), m_listsFileNames.end());
+    }
+    catch (...) {}
+}
+
+void ZapretGUI::LoadListsFile(int index)
+{
+    m_listsContent.clear();
+    if (index < 0 || index >= (int)m_listsFileNames.size()) return;
+    if (!m_pathsValid) return;
+
+    fs::path file = m_listsPath / m_listsFileNames[index];
+    std::wifstream f(file);
+    if (!f.is_open()) return;
+
+    std::wstring line;
+    while (std::getline(f, line))
+    {
+        if (!line.empty() && line.back() == L'\r') line.pop_back();
+        m_listsContent += line + L"\r\n";
+    }
+    f.close();
+
+    if (m_hListsEdit)
+        SetWindowTextW(m_hListsEdit, m_listsContent.c_str());
+
+    m_listsCurrentFile = index;
+}
+
+void ZapretGUI::SaveListsFile()
+{
+    if (m_listsCurrentFile < 0 || m_listsCurrentFile >= (int)m_listsFileNames.size()) return;
+    if (!m_pathsValid) return;
+    if (!m_hListsEdit) return;
+
+    int len = GetWindowTextLengthW(m_hListsEdit);
+    std::vector<wchar_t> buf(len + 1, 0);
+    GetWindowTextW(m_hListsEdit, buf.data(), len + 1);
+
+    fs::path file = m_listsPath / m_listsFileNames[m_listsCurrentFile];
+    std::wofstream f(file);
+    if (!f.is_open())
+    {
+        MessageBoxW(m_hListsWnd, L"\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C \u0444\u0430\u0439\u043B.",
+            L"Zapret Gui", MB_ICONERROR);
+        return;
+    }
+
+    f << buf.data();
+    f.close();
+
+    if (m_connected)
+    {
+        StopWinws();
+        if (m_selectedBatIndex >= 0)
+            StartWinws(m_strategies[m_selectedBatIndex]);
+    }
+
+    MessageBoxW(m_hListsWnd, L"\u0424\u0430\u0439\u043B \u0441\u043E\u0445\u0440\u0430\u043D\u0451\u043D.",
+        L"Zapret Gui", MB_ICONINFORMATION);
+}
+
+void ZapretGUI::OpenListsEditor()
+{
+    if (m_hListsWnd)
+    {
+        SetForegroundWindow(m_hListsWnd);
+        return;
+    }
+
+    if (!m_pathsValid)
+    {
+        MessageBoxW(m_hSettingsWnd ? m_hSettingsWnd : m_hWnd,
+            L"\u041F\u0430\u043F\u043A\u0430 lists \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u0430.",
+            L"Zapret Gui", MB_ICONERROR);
+        return;
+    }
+
+    ScanListsFiles();
+    if (m_listsFileNames.empty())
+    {
+        MessageBoxW(m_hSettingsWnd ? m_hSettingsWnd : m_hWnd,
+            L"\u0412 \u043F\u0430\u043F\u043A\u0435 lists \u043D\u0435\u0442 .txt \u0444\u0430\u0439\u043B\u043E\u0432.",
+            L"Zapret Gui", MB_ICONWARNING);
+        return;
+    }
+
+    static bool registered = false;
+    if (!registered)
+    {
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(wc);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = ListsWndProc;
+        wc.hInstance = m_hInstance;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = nullptr;
+        wc.lpszClassName = L"ZapretLists";
+        wc.hIcon = m_hAppIcon;
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+
+    RECT mainRect;
+    GetWindowRect(m_hWnd, &mainRect);
+    int sw = 700, sh = 600;
+    int sx = mainRect.left + (mainRect.right - mainRect.left - sw) / 2;
+    int sy = mainRect.top + (mainRect.bottom - mainRect.top - sh) / 2;
+
+    m_listsScroll = 0;
+    m_listsCurrentFile = 0;
+    m_listsCloseHovered = false;
+    m_listsSaveHovered = false;
+    m_listsReloadHovered = false;
+    m_listsHoveredTab = -1;
+
+    m_hListsWnd = CreateWindowExW(
+        WS_EX_TOOLWINDOW,
+        L"ZapretLists", L"",
+        WS_POPUP | WS_VISIBLE,
+        sx, sy, sw, sh,
+        m_hWnd, nullptr, m_hInstance, this);
+
+    BOOL darkMode = TRUE;
+    DwmSetWindowAttribute(m_hListsWnd, 20, &darkMode, sizeof(darkMode));
+
+    m_hListsEdit = CreateWindowExW(
+        WS_EX_CLIENTEDGE,
+        L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL |
+        ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
+        20, 100, sw - 40, sh - 170,
+        m_hListsWnd, nullptr, m_hInstance, nullptr);
+
+    HFONT hFont = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, FF_MODERN, L"Consolas");
+    SendMessage(m_hListsEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    LoadListsFile(0);
+
+    ShowWindow(m_hListsWnd, SW_SHOW);
+    UpdateWindow(m_hListsWnd);
+}
+
+LRESULT CALLBACK ZapretGUI::ListsWndProc(HWND hWnd, UINT msg, WPARAM w, LPARAM l)
+{
+    ZapretGUI* p = nullptr;
+    if (msg == WM_CREATE)
+    {
+        auto cs = reinterpret_cast<CREATESTRUCT*>(l);
+        p = reinterpret_cast<ZapretGUI*>(cs->lpCreateParams);
+        SetWindowLongPtr(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(p));
+    }
+    else p = reinterpret_cast<ZapretGUI*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+    if (p) return p->HandleListsMessage(msg, w, l);
+    return DefWindowProc(hWnd, msg, w, l);
+}
+
+LRESULT ZapretGUI::HandleListsMessage(UINT msg, WPARAM w, LPARAM l)
+{
+    switch (msg)
+    {
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(m_hListsWnd, &ps);
+        RECT cr; GetClientRect(m_hListsWnd, &cr);
+
+        HDC memDC = CreateCompatibleDC(hdc);
+        HBITMAP memBmp = CreateCompatibleBitmap(hdc, cr.right, cr.bottom);
+        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
+
+        DrawListsWindow(memDC, cr.right, cr.bottom);
+
+        BitBlt(hdc, 0, 0, cr.right, cr.bottom, memDC, 0, 0, SRCCOPY);
+        SelectObject(memDC, oldBmp);
+        DeleteObject(memBmp);
+        DeleteDC(memDC);
+        EndPaint(m_hListsWnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND: return 1;
+    case WM_MOUSEMOVE:
+        OnListsMouseMove(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+        return 0;
+    case WM_LBUTTONDOWN:
+    {
+        int x = GET_X_LPARAM(l), y = GET_Y_LPARAM(l);
+        if (y < 44 && !m_listsCloseHovered)
+        {
+            ReleaseCapture();
+            SendMessage(m_hListsWnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP:
+        OnListsClick(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+        return 0;
+    case WM_SIZE:
+        if (m_hListsEdit)
+        {
+            RECT cr; GetClientRect(m_hListsWnd, &cr);
+            SetWindowPos(m_hListsEdit, nullptr,
+                20, 100, cr.right - 40, cr.bottom - 170,
+                SWP_NOZORDER);
+        }
+        return 0;
+    case WM_CTLCOLOREDIT:
+    {
+        HDC hdc = (HDC)w;
+        SetTextColor(hdc, RGB(230, 250, 240));
+        SetBkColor(hdc, RGB(18, 30, 25));
+        static HBRUSH hBrush = CreateSolidBrush(RGB(18, 30, 25));
+        return (LRESULT)hBrush;
+    }
+    case WM_CLOSE:
+        if (m_hListsEdit) { DestroyWindow(m_hListsEdit); m_hListsEdit = nullptr; }
+        DestroyWindow(m_hListsWnd);
+        return 0;
+    case WM_DESTROY:
+        m_hListsWnd = nullptr;
+        return 0;
+    }
+    return DefWindowProc(m_hListsWnd, msg, w, l);
+}
+
+void ZapretGUI::OnListsMouseMove(int x, int y)
+{
+    RECT cr; GetClientRect(m_hListsWnd, &cr);
+
+    bool wasClose = m_listsCloseHovered;
+    bool wasSave = m_listsSaveHovered;
+    bool wasReload = m_listsReloadHovered;
+    int wasTab = m_listsHoveredTab;
+
+    m_listsCloseHovered = PtInRect(x, y, cr.right - 38, 8, 30, 28);
+    m_listsReloadHovered = PtInRect(x, y, cr.right - 230, cr.bottom - 50, 100, 36);
+    m_listsSaveHovered = PtInRect(x, y, cr.right - 120, cr.bottom - 50, 100, 36);
+
+    m_listsHoveredTab = -1;
+    int tabX = 20 + m_listsScroll;
+    for (size_t i = 0; i < m_listsFileNames.size(); i++)
+    {
+        int tabW = (int)m_listsFileNames[i].length() * 8 + 24;
+        if (x >= 20 && x <= cr.right - 20 && PtInRect(x, y, tabX, 60, tabW, 30))
+        {
+            m_listsHoveredTab = (int)i;
+            break;
+        }
+        tabX += tabW + 4;
+    }
+
+    if (wasClose != m_listsCloseHovered || wasSave != m_listsSaveHovered ||
+        wasReload != m_listsReloadHovered || wasTab != m_listsHoveredTab)
+        InvalidateRect(m_hListsWnd, nullptr, FALSE);
+
+    if (m_listsCloseHovered || m_listsSaveHovered || m_listsReloadHovered || m_listsHoveredTab >= 0)
+        SetCursor(LoadCursor(nullptr, IDC_HAND));
+}
+
+void ZapretGUI::OnListsClick(int x, int y)
+{
+    if (!m_hListsWnd) return;
+
+    if (m_listsCloseHovered)
+    {
+        PostMessage(m_hListsWnd, WM_CLOSE, 0, 0);
+        return;
+    }
+
+    if (m_listsSaveHovered)
+    {
+        SaveListsFile();
+        return;
+    }
+
+    if (m_listsReloadHovered)
+    {
+        LoadListsFile(m_listsCurrentFile);
+        return;
+    }
+
+    if (m_listsHoveredTab >= 0 && m_listsHoveredTab != m_listsCurrentFile)
+    {
+        LoadListsFile(m_listsHoveredTab);
+        InvalidateRect(m_hListsWnd, nullptr, FALSE);
+    }
+}
+
+void ZapretGUI::DrawListsWindow(HDC hdc, int w, int h)
+{
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+
+    Gdiplus::SolidBrush bg(Colors::BgDark());
+    g.FillRectangle(&bg, 0, 0, w, h);
+
+    Gdiplus::Pen border(Colors::Accent(), 2);
+    g.DrawRectangle(&border, 0, 0, w - 1, h - 1);
+
+    Gdiplus::SolidBrush titleBg(Colors::BgTitle());
+    g.FillRectangle(&titleBg, 1, 1, w - 2, 44);
+
+    Gdiplus::FontFamily ff(L"Segoe UI");
+    Gdiplus::Font titleFont(&ff, 14, Gdiplus::FontStyleBold);
+    Gdiplus::SolidBrush titleBrush(Colors::Accent());
+    g.DrawString(L"\u0420\u0435\u0434\u0430\u043A\u0442\u043E\u0440 \u0441\u043F\u0438\u0441\u043A\u043E\u0432", -1, &titleFont,
+        Gdiplus::PointF(18, 12), &titleBrush);
+
+    int closeX = w - 38, closeY = 8;
+    if (m_listsCloseHovered)
+    {
+        Gdiplus::SolidBrush ch(Gdiplus::Color(255, 232, 17, 35));
+        g.FillRectangle(&ch, closeX, closeY, 30, 28);
+    }
+    Gdiplus::Pen closePen(Colors::Text(), 1.5f);
+    int ccx = closeX + 15, ccy = closeY + 14;
+    g.DrawLine(&closePen, ccx - 6, ccy - 6, ccx + 6, ccy + 6);
+    g.DrawLine(&closePen, ccx + 6, ccy - 6, ccx - 6, ccy + 6);
+
+    Gdiplus::Region tabClip(Gdiplus::Rect(20, 55, w - 40, 45));
+    g.SetClip(&tabClip);
+
+    Gdiplus::Font tabFont(&ff, 9, Gdiplus::FontStyleBold);
+    int tabX = 20 + m_listsScroll;
+    for (size_t i = 0; i < m_listsFileNames.size(); i++)
+    {
+        int tabW = (int)m_listsFileNames[i].length() * 8 + 24;
+        int tabH = 30;
+        bool active = ((int)i == m_listsCurrentFile);
+        bool hov = ((int)i == m_listsHoveredTab);
+
+        Gdiplus::Color tabBg = active ? Colors::Accent() :
+            (hov ? Colors::BgHover() : Colors::BgCard());
+        Gdiplus::SolidBrush tb(tabBg);
+        FillRoundRect(g, &tb, tabX, 60, tabW, tabH, 6);
+
+        if (!active)
+        {
+            Gdiplus::Pen tp(Colors::Border(), 1);
+            DrawRoundRect(g, &tp, tabX, 60, tabW, tabH, 6);
+        }
+
+        Gdiplus::Color tcol = active ? Gdiplus::Color(255, 8, 14, 12) : Colors::Text();
+        Gdiplus::SolidBrush tbrush(tcol);
+        Gdiplus::StringFormat tsf;
+        tsf.SetAlignment(Gdiplus::StringAlignmentCenter);
+        tsf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        Gdiplus::RectF tr((float)tabX, 60, (float)tabW, (float)tabH);
+        g.DrawString(m_listsFileNames[i].c_str(), -1, &tabFont, tr, &tsf, &tbrush);
+
+        tabX += tabW + 4;
+    }
+
+    Gdiplus::SolidBrush footerBg(Colors::BgTitle());
+    g.FillRectangle(&footerBg, 1, h - 60, w - 2, 59);
+    Gdiplus::Pen footerLine(Colors::Border(), 1);
+    g.DrawLine(&footerLine, 1, h - 60, w - 2, h - 60);
+
+    Gdiplus::Font hintFont(&ff, 9, Gdiplus::FontStyleRegular);
+    Gdiplus::SolidBrush hintBrush(Colors::TextDim());
+    g.DrawString(L"\u041A\u0430\u0436\u0434\u0430\u044F \u0441\u0442\u0440\u043E\u043A\u0430 \u2014 \u043E\u0434\u0438\u043D \u0434\u043E\u043C\u0435\u043D \u0438\u043B\u0438 IP. \u0421\u0442\u0440\u043E\u043A\u0438 \u0441 # \u0438\u0433\u043D\u043E\u0440\u0438\u0440\u0443\u044E\u0442\u0441\u044F.", -1,
+        &hintFont, Gdiplus::PointF(20, (float)(h - 36)), &hintBrush);
+
+    int rbX = w - 230, rbY = h - 50, rbW = 100, rbH = 36;
+    Gdiplus::Color rbgc = m_listsReloadHovered ? Colors::BgHover() : Colors::BgCard();
+    Gdiplus::SolidBrush rbb(rbgc);
+    FillRoundRect(g, &rbb, rbX, rbY, rbW, rbH, 8);
+    Gdiplus::Pen rbp(Colors::Border(), 1);
+    DrawRoundRect(g, &rbp, rbX, rbY, rbW, rbH, 8);
+    Gdiplus::Font rbf(&ff, 11, Gdiplus::FontStyleBold);
+    Gdiplus::SolidBrush rbt(Colors::Text());
+    Gdiplus::StringFormat rsf;
+    rsf.SetAlignment(Gdiplus::StringAlignmentCenter);
+    rsf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+    Gdiplus::RectF rbr((float)rbX, (float)rbY, (float)rbW, (float)rbH);
+    g.DrawString(L"\u21BB \u041E\u0442\u043C\u0435\u043D\u0430", -1, &rbf, rbr, &rsf, &rbt);
+
+    int sbX = w - 120, sbY = h - 50, sbW = 100, sbH = 36;
+    Gdiplus::Color sbgc = m_listsSaveHovered ? Colors::AccentHover() : Colors::Accent();
+    Gdiplus::SolidBrush sbb(sbgc);
+    FillRoundRect(g, &sbb, sbX, sbY, sbW, sbH, 8);
+    Gdiplus::Font sbf(&ff, 11, Gdiplus::FontStyleBold);
+    Gdiplus::SolidBrush sbt(Gdiplus::Color(255, 8, 14, 12));
+    Gdiplus::RectF sbr((float)sbX, (float)sbY, (float)sbW, (float)sbH);
+    g.DrawString(L"\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C", -1, &sbf, sbr, &rsf, &sbt);
+}
+
+void ZapretGUI::CreateTrayIcon()
+{
+    if (m_trayCreated) return;
+
+    m_trayIcon.cbSize = sizeof(NOTIFYICONDATAW);
+    m_trayIcon.hWnd = m_hWnd;
+    m_trayIcon.uID = 1;
+    m_trayIcon.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    m_trayIcon.uCallbackMessage = WM_TRAY_ICON;
+    m_trayIcon.hIcon = m_hTrayIconSmall;
+    wcscpy_s(m_trayIcon.szTip, L"Zapret Gui");
+
+    if (Shell_NotifyIconW(NIM_ADD, &m_trayIcon))
+    {
+        m_trayCreated = true;
+        UpdateTrayIcon();
+    }
+}
+
+void ZapretGUI::RemoveTrayIcon()
+{
+    if (!m_trayCreated) return;
+    Shell_NotifyIconW(NIM_DELETE, &m_trayIcon);
+    m_trayCreated = false;
+}
+
+void ZapretGUI::UpdateTrayIcon()
+{
+    if (!m_trayCreated) return;
+
+    std::wstring tip = L"Zapret Gui - ";
+    tip += m_connected ? L"\u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u043E" : L"\u041E\u0442\u043A\u043B\u044E\u0447\u0435\u043D\u043E";
+    if (m_connected && m_selectedBatIndex >= 0 && m_selectedBatIndex < (int)m_strategies.size())
+    {
+        tip += L"\n";
+        tip += m_strategies[m_selectedBatIndex].displayName;
+    }
+
+    wcsncpy_s(m_trayIcon.szTip, tip.c_str(), 127);
+    Shell_NotifyIconW(NIM_MODIFY, &m_trayIcon);
+}
+
+void ZapretGUI::ShowNotification(const std::wstring& title, const std::wstring& text)
+{
+    if (!m_trayCreated) return;
+
+    NOTIFYICONDATAW nd = {};
+    nd.cbSize = sizeof(NOTIFYICONDATAW);
+    nd.hWnd = m_hWnd;
+    nd.uID = 1;
+    nd.uFlags = NIF_INFO;
+    nd.dwInfoFlags = NIIF_INFO | NIIF_LARGE_ICON;
+    nd.hBalloonIcon = m_hAppIcon;
+
+    wcsncpy_s(nd.szInfoTitle, title.c_str(), 63);
+    wcsncpy_s(nd.szInfo, text.c_str(), 255);
+
+    Shell_NotifyIconW(NIM_MODIFY, &nd);
+}
+
+void ZapretGUI::ShowTrayMenu()
+{
+    POINT pt;
+    GetCursorPos(&pt);
+
+    HMENU hMenu = CreatePopupMenu();
+    if (!hMenu) return;
+
+    AppendMenuW(hMenu, MF_STRING, TRAY_ID_SHOW,
+        L"\u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u043E\u043A\u043D\u043E");
+
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+
+    std::wstring connectText = m_connected
+        ? L"\u041E\u0442\u043A\u043B\u044E\u0447\u0438\u0442\u044C"
+        : L"\u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0438\u0442\u044C";
+    AppendMenuW(hMenu, MF_STRING, TRAY_ID_CONNECT, connectText.c_str());
+
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+
+    AppendMenuW(hMenu, MF_STRING, TRAY_ID_EXIT,
+        L"\u0412\u044B\u0445\u043E\u0434");
+
+    SetForegroundWindow(m_hWnd);
+
+    int cmd = TrackPopupMenu(hMenu,
+        TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+        pt.x, pt.y, 0, m_hWnd, nullptr);
+
+    DestroyMenu(hMenu);
+
+    switch (cmd)
+    {
+    case TRAY_ID_SHOW:
+        ShowWindow(m_hWnd, SW_SHOW);
+        ShowWindow(m_hWnd, SW_RESTORE);
+        SetForegroundWindow(m_hWnd);
+        break;
+    case TRAY_ID_CONNECT:
+        ToggleConnection();
+        break;
+    case TRAY_ID_EXIT:
+        RemoveTrayIcon();
+        PostMessage(m_hWnd, WM_DESTROY, 0, 0);
+        break;
+    }
+}
+
+void ZapretGUI::OnTrayMessage(WPARAM wParam, LPARAM lParam)
+{
+    UINT msg = LOWORD(lParam);
+
+    if (msg == WM_LBUTTONDBLCLK || msg == WM_LBUTTONUP)
+    {
+        ShowWindow(m_hWnd, SW_SHOW);
+        ShowWindow(m_hWnd, SW_RESTORE);
+        SetForegroundWindow(m_hWnd);
+    }
+    else if (msg == WM_RBUTTONUP)
+    {
+        ShowTrayMenu();
+    }
+}
+
+void ZapretGUI::ShowCustomTrayMenu()
+{
+    if (m_hTrayMenuWnd)
+    {
+        DestroyWindow(m_hTrayMenuWnd);
+        m_hTrayMenuWnd = nullptr;
+        return;
+    }
+
+    static bool registered = false;
+    if (!registered)
+    {
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(wc);
+        wc.style = CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW;
+        wc.lpfnWndProc = TrayMenuWndProc;
+        wc.hInstance = m_hInstance;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = nullptr;
+        wc.lpszClassName = L"ZapretTrayMenu";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+
+    POINT pt;
+    GetCursorPos(&pt);
+
+    int menuW = 220;
+    int menuH = 200;
+
+    RECT desktopRect;
+    GetWindowRect(GetDesktopWindow(), &desktopRect);
+
+    int posX = pt.x - menuW;
+    int posY = pt.y - menuH;
+
+    if (posX < 0) posX = 0;
+    if (posY < 0) posY = pt.y + 10;
+
+    m_trayMenuHovered = -1;
+
+    m_hTrayMenuWnd = CreateWindowExW(
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        L"ZapretTrayMenu", L"",
+        WS_POPUP | WS_VISIBLE,
+        posX, posY, menuW, menuH,
+        m_hWnd, nullptr, m_hInstance, this);
+
+    SetForegroundWindow(m_hTrayMenuWnd);
+}
+
+LRESULT CALLBACK ZapretGUI::TrayMenuWndProc(HWND hWnd, UINT msg, WPARAM w, LPARAM l)
+{
+    ZapretGUI* p = nullptr;
+    if (msg == WM_CREATE)
+    {
+        auto cs = reinterpret_cast<CREATESTRUCT*>(l);
+        p = reinterpret_cast<ZapretGUI*>(cs->lpCreateParams);
+        SetWindowLongPtr(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(p));
+    }
+    else p = reinterpret_cast<ZapretGUI*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+    if (p) return p->HandleTrayMenuMessage(msg, w, l);
+    return DefWindowProc(hWnd, msg, w, l);
+}
+
+LRESULT ZapretGUI::HandleTrayMenuMessage(UINT msg, WPARAM w, LPARAM l)
+{
+    switch (msg)
+    {
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(m_hTrayMenuWnd, &ps);
+        RECT cr; GetClientRect(m_hTrayMenuWnd, &cr);
+
+        HDC memDC = CreateCompatibleDC(hdc);
+        HBITMAP memBmp = CreateCompatibleBitmap(hdc, cr.right, cr.bottom);
+        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
+
+        DrawTrayMenu(memDC, cr.right, cr.bottom);
+
+        BitBlt(hdc, 0, 0, cr.right, cr.bottom, memDC, 0, 0, SRCCOPY);
+        SelectObject(memDC, oldBmp);
+        DeleteObject(memBmp);
+        DeleteDC(memDC);
+        EndPaint(m_hTrayMenuWnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND: return 1;
+    case WM_MOUSEMOVE:
+    {
+        int y = GET_Y_LPARAM(l);
+        int newHov = -1;
+        if (y >= 10 && y < 50) newHov = 0;
+        else if (y >= 60 && y < 100) newHov = 1;
+        else if (y >= 100 && y < 140) newHov = 2;
+        else if (y >= 150 && y < 190) newHov = 3;
+
+        if (newHov != m_trayMenuHovered)
+        {
+            m_trayMenuHovered = newHov;
+            InvalidateRect(m_hTrayMenuWnd, nullptr, FALSE);
+        }
+
+        if (newHov >= 0) SetCursor(LoadCursor(nullptr, IDC_HAND));
+        return 0;
+    }
+    case WM_LBUTTONUP:
+    {
+        int hov = m_trayMenuHovered;
+        DestroyWindow(m_hTrayMenuWnd);
+        m_hTrayMenuWnd = nullptr;
+
+        switch (hov)
+        {
+        case 0:
+            ShowWindow(m_hWnd, SW_SHOW);
+            ShowWindow(m_hWnd, SW_RESTORE);
+            SetForegroundWindow(m_hWnd);
+            break;
+        case 1:
+            ToggleConnection();
+            break;
+        case 2:
+            OpenStrategyPicker();
+            break;
+        case 3:
+            RemoveTrayIcon();
+            PostMessage(m_hWnd, WM_DESTROY, 0, 0);
+            break;
+        }
+        return 0;
+    }
+    case WM_ACTIVATE:
+        if (LOWORD(w) == WA_INACTIVE)
+        {
+            DestroyWindow(m_hTrayMenuWnd);
+            m_hTrayMenuWnd = nullptr;
+        }
+        return 0;
+    case WM_DESTROY:
+        m_hTrayMenuWnd = nullptr;
+        return 0;
+    }
+    return DefWindowProc(m_hTrayMenuWnd, msg, w, l);
+}
+
+void ZapretGUI::DrawTrayMenu(HDC hdc, int w, int h)
+{
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+
+    Gdiplus::SolidBrush bg(Colors::BgDark());
+    g.FillRectangle(&bg, 0, 0, w, h);
+
+    Gdiplus::Pen border(Colors::Accent(), 1);
+    g.DrawRectangle(&border, 0, 0, w - 1, h - 1);
+
+    Gdiplus::FontFamily ff(L"Segoe UI");
+    Gdiplus::Font font(&ff, 10, Gdiplus::FontStyleBold);
+
+    const wchar_t* items[4];
+    items[0] = L"\u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u043E\u043A\u043D\u043E";
+    items[1] = m_connected ? L"\u041E\u0442\u043A\u043B\u044E\u0447\u0438\u0442\u044C" : L"\u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0438\u0442\u044C";
+    items[2] = L"\u0421\u0442\u0440\u0430\u0442\u0435\u0433\u0438\u0438...";
+    items[3] = L"\u0412\u044B\u0445\u043E\u0434";
+
+    int ys[4] = { 10, 60, 100, 150 };
+
+    Gdiplus::Pen sep(Colors::Border(), 1);
+    g.DrawLine(&sep, 8, 55, w - 8, 55);
+    g.DrawLine(&sep, 8, 145, w - 8, 145);
+
+    for (int i = 0; i < 4; i++)
+    {
+        bool hov = (i == m_trayMenuHovered);
+
+        if (hov)
+        {
+            Gdiplus::SolidBrush hb(Colors::BgHover());
+            FillRoundRect(g, &hb, 5, ys[i] - 2, w - 10, 36, 6);
+        }
+
+        Gdiplus::Color textCol = (i == 3 && hov) ? Colors::Danger() : Colors::Text();
+        if (i == 1 && hov)
+            textCol = m_connected ? Colors::Danger() : Colors::Accent();
+
+        Gdiplus::SolidBrush tb(textCol);
+        g.DrawString(items[i], -1, &font,
+            Gdiplus::PointF(20, (float)(ys[i] + 8)), &tb);
+    }
+}
+
+
+void ZapretGUI::OpenStrategyPicker()
+{
+    if (m_hStrategyPickerWnd)
+    {
+        SetForegroundWindow(m_hStrategyPickerWnd);
+        return;
+    }
+
+    static bool registered = false;
+    if (!registered)
+    {
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(wc);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = StrategyPickerWndProc;
+        wc.hInstance = m_hInstance;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = nullptr;
+        wc.lpszClassName = L"ZapretStrategyPicker";
+        wc.hIcon = m_hAppIcon;
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+
+    int sw = 360, sh = 500;
+
+    POINT pt;
+    GetCursorPos(&pt);
+    int sx = pt.x - sw;
+    int sy = pt.y - sh;
+
+    if (sx < 50) sx = 50;
+    if (sy < 50) sy = 50;
+
+    m_strategyPickerScroll = 0;
+    m_strategyPickerHovered = -1;
+    m_strategyPickerCloseHovered = false;
+
+    m_hStrategyPickerWnd = CreateWindowExW(
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        L"ZapretStrategyPicker", L"",
+        WS_POPUP | WS_VISIBLE,
+        sx, sy, sw, sh,
+        m_hWnd, nullptr, m_hInstance, this);
+
+    BOOL darkMode = TRUE;
+    DwmSetWindowAttribute(m_hStrategyPickerWnd, 20, &darkMode, sizeof(darkMode));
+
+    ShowWindow(m_hStrategyPickerWnd, SW_SHOW);
+    SetForegroundWindow(m_hStrategyPickerWnd);
+}
+
+LRESULT CALLBACK ZapretGUI::StrategyPickerWndProc(HWND hWnd, UINT msg, WPARAM w, LPARAM l)
+{
+    ZapretGUI* p = nullptr;
+    if (msg == WM_CREATE)
+    {
+        auto cs = reinterpret_cast<CREATESTRUCT*>(l);
+        p = reinterpret_cast<ZapretGUI*>(cs->lpCreateParams);
+        SetWindowLongPtr(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(p));
+    }
+    else p = reinterpret_cast<ZapretGUI*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+    if (p) return p->HandleStrategyPickerMessage(msg, w, l);
+    return DefWindowProc(hWnd, msg, w, l);
+}
+
+LRESULT ZapretGUI::HandleStrategyPickerMessage(UINT msg, WPARAM w, LPARAM l)
+{
+    switch (msg)
+    {
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(m_hStrategyPickerWnd, &ps);
+        RECT cr; GetClientRect(m_hStrategyPickerWnd, &cr);
+
+        HDC memDC = CreateCompatibleDC(hdc);
+        HBITMAP memBmp = CreateCompatibleBitmap(hdc, cr.right, cr.bottom);
+        HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
+
+        DrawStrategyPicker(memDC, cr.right, cr.bottom);
+
+        BitBlt(hdc, 0, 0, cr.right, cr.bottom, memDC, 0, 0, SRCCOPY);
+        SelectObject(memDC, oldBmp);
+        DeleteObject(memBmp);
+        DeleteDC(memDC);
+        EndPaint(m_hStrategyPickerWnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND: return 1;
+    case WM_MOUSEMOVE:
+    {
+        int x = GET_X_LPARAM(l), y = GET_Y_LPARAM(l);
+        RECT cr; GetClientRect(m_hStrategyPickerWnd, &cr);
+
+        bool wasClose = m_strategyPickerCloseHovered;
+        int wasHov = m_strategyPickerHovered;
+
+        m_strategyPickerCloseHovered = PtInRect(x, y, cr.right - 38, 8, 30, 28);
+
+        m_strategyPickerHovered = -1;
+        if (!m_strategyPickerCloseHovered)
+        {
+            int listY = 50;
+            int listH = cr.bottom - listY - 10;
+            if (x >= 10 && x <= cr.right - 10 && y >= listY && y < listY + listH)
+            {
+                int rel = y - listY - m_strategyPickerScroll;
+                int idx = rel / 42;
+                if (idx >= 0 && idx < (int)m_strategies.size())
+                    m_strategyPickerHovered = idx;
+            }
+        }
+
+        if (wasClose != m_strategyPickerCloseHovered || wasHov != m_strategyPickerHovered)
+            InvalidateRect(m_hStrategyPickerWnd, nullptr, FALSE);
+
+        if (m_strategyPickerCloseHovered || m_strategyPickerHovered >= 0)
+            SetCursor(LoadCursor(nullptr, IDC_HAND));
+        return 0;
+    }
+    case WM_LBUTTONUP:
+    {
+        if (m_strategyPickerCloseHovered)
+        {
+            DestroyWindow(m_hStrategyPickerWnd);
+            return 0;
+        }
+
+        if (m_strategyPickerHovered >= 0 && m_strategyPickerHovered < (int)m_strategies.size())
+        {
+            bool wasConnected = m_connected;
+            m_selectedBatIndex = m_strategyPickerHovered;
+            SaveConfig();
+
+            if (wasConnected)
+            {
+                StopWinws();
+                StartWinws(m_strategies[m_selectedBatIndex]);
+                m_sessionStart = std::chrono::steady_clock::now();
+                m_sessionActive = true;
+                m_connected = true;
+            }
+
+            UpdateTrayIcon();
+            InvalidateRect(m_hWnd, nullptr, FALSE);
+            DestroyWindow(m_hStrategyPickerWnd);
+        }
+        return 0;
+    }
+    case WM_MOUSEWHEEL:
+    {
+        int delta = GET_WHEEL_DELTA_WPARAM(w);
+        RECT cr; GetClientRect(m_hStrategyPickerWnd, &cr);
+        int viewH = cr.bottom - 60;
+        int contentH = (int)m_strategies.size() * 42;
+
+        if (contentH > viewH)
+        {
+            m_strategyPickerScroll += (delta > 0) ? 42 : -42;
+            int maxScroll = -(contentH - viewH);
+            if (m_strategyPickerScroll > 0) m_strategyPickerScroll = 0;
+            if (m_strategyPickerScroll < maxScroll) m_strategyPickerScroll = maxScroll;
+            InvalidateRect(m_hStrategyPickerWnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_ACTIVATE:
+        if (LOWORD(w) == WA_INACTIVE)
+        {
+            DestroyWindow(m_hStrategyPickerWnd);
+        }
+        return 0;
+    case WM_CLOSE:
+        DestroyWindow(m_hStrategyPickerWnd);
+        return 0;
+    case WM_DESTROY:
+        m_hStrategyPickerWnd = nullptr;
+        return 0;
+    }
+    return DefWindowProc(m_hStrategyPickerWnd, msg, w, l);
+}
+
+void ZapretGUI::DrawStrategyPicker(HDC hdc, int w, int h)
+{
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+
+    Gdiplus::SolidBrush bg(Colors::BgDark());
+    g.FillRectangle(&bg, 0, 0, w, h);
+
+    Gdiplus::Pen border(Colors::Accent(), 2);
+    g.DrawRectangle(&border, 0, 0, w - 1, h - 1);
+
+    Gdiplus::SolidBrush titleBg(Colors::BgTitle());
+    g.FillRectangle(&titleBg, 1, 1, w - 2, 40);
+
+    Gdiplus::FontFamily ff(L"Segoe UI");
+    Gdiplus::Font titleFont(&ff, 12, Gdiplus::FontStyleBold);
+    Gdiplus::SolidBrush titleBrush(Colors::Accent());
+    g.DrawString(L"\u0412\u044B\u0431\u043E\u0440 \u0441\u0442\u0440\u0430\u0442\u0435\u0433\u0438\u0438", -1,
+        &titleFont, Gdiplus::PointF(15, 10), &titleBrush);
+
+    int closeX = w - 38, closeY = 6;
+    if (m_strategyPickerCloseHovered)
+    {
+        Gdiplus::SolidBrush ch(Gdiplus::Color(255, 232, 17, 35));
+        g.FillRectangle(&ch, closeX, closeY, 30, 28);
+    }
+    Gdiplus::Pen closePen(Colors::Text(), 1.5f);
+    int ccx = closeX + 15, ccy = closeY + 14;
+    g.DrawLine(&closePen, ccx - 6, ccy - 6, ccx + 6, ccy + 6);
+    g.DrawLine(&closePen, ccx + 6, ccy - 6, ccx - 6, ccy + 6);
+
+    int listY = 50;
+    int listH = h - listY - 10;
+
+    Gdiplus::Region clip(Gdiplus::Rect(10, listY, w - 20, listH));
+    g.SetClip(&clip);
+
+    Gdiplus::Font itemFont(&ff, 11, Gdiplus::FontStyleBold);
+
+    for (size_t i = 0; i < m_strategies.size(); i++)
+    {
+        int y = listY + (int)i * 42 + m_strategyPickerScroll;
+        if (y + 38 < listY || y > listY + listH) continue;
+
+        bool sel = ((int)i == m_selectedBatIndex);
+        bool hov = ((int)i == m_strategyPickerHovered);
+
+        if (sel)
+        {
+            Gdiplus::LinearGradientBrush grad(
+                Gdiplus::PointF(15, (float)y), Gdiplus::PointF((float)(w - 15), (float)y),
+                Colors::AccentDeep(), Colors::Accent());
+            FillRoundRect(g, &grad, 15, y, w - 30, 36, 8);
+        }
+        else if (hov)
+        {
+            Gdiplus::SolidBrush hb(Colors::BgHover());
+            FillRoundRect(g, &hb, 15, y, w - 30, 36, 8);
+            Gdiplus::Pen hp(Colors::Accent(), 1);
+            DrawRoundRect(g, &hp, 15, y, w - 30, 36, 8);
+        }
+
+        Gdiplus::Color textCol = sel ? Gdiplus::Color(255, 8, 14, 12) : Colors::Text();
+        Gdiplus::SolidBrush tb(textCol);
+        g.DrawString(m_strategies[i].displayName.c_str(), -1, &itemFont,
+            Gdiplus::PointF(28, (float)(y + 10)), &tb);
+
+        if (sel)
+        {
+            Gdiplus::Pen cp(Gdiplus::Color(255, 8, 14, 12), 2);
+            cp.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
+            int chX = w - 35, chY = y + 18;
+            g.DrawLine(&cp, chX, chY, chX + 4, chY + 4);
+            g.DrawLine(&cp, chX + 4, chY + 4, chX + 12, chY - 5);
+        }
+    }
+
+    g.ResetClip();
+}
+
+void ZapretGUI::CheckForUpdates(bool silent)
+{
+    if (m_updateThread.joinable()) m_updateThread.join();
+    m_updateThread = std::thread(&ZapretGUI::CheckUpdatesThread, this, silent);
+}
+
+void ZapretGUI::CheckUpdatesThread(bool silent)
+{
+    std::string json;
+    bool ok = DownloadToString(
+        L"https://api.github.com/repos/victor13452vic-png/zapret-gui-discord-youtube/releases/latest",
+        json);
+
+    if (!ok || json.empty())
+    {
+        if (!silent)
+        {
+            MessageBoxW(m_hWnd,
+                L"\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C \u043E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u044F.\n\u041F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435 \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u0435 \u043A \u0438\u043D\u0442\u0435\u0440\u043D\u0435\u0442\u0443.",
+                L"Zapret Gui", MB_ICONWARNING);
+        }
+        return;
+    }
+
+    size_t tagPos = json.find("\"tag_name\":");
+    if (tagPos == std::string::npos) return;
+
+    size_t valStart = json.find('"', tagPos + 11);
+    if (valStart == std::string::npos) return;
+    valStart++;
+    size_t valEnd = json.find('"', valStart);
+    if (valEnd == std::string::npos) return;
+
+    std::string tag = json.substr(valStart, valEnd - valStart);
+    if (tag.empty()) return;
+    if (tag[0] == 'v' || tag[0] == 'V') tag.erase(0, 1);
+
+    std::string current = "";
+    {
+        wchar_t buf[64];
+        wcscpy_s(buf, APP_VERSION);
+        for (int i = 0; buf[i]; i++) current += (char)buf[i];
+    }
+
+    auto parseVer = [](const std::string& s) -> int {
+        int major = 0, minor = 0, patch = 0;
+        sscanf(s.c_str(), "%d.%d.%d", &major, &minor, &patch);
+        return major * 10000 + minor * 100 + patch;
+    };
+
+    int currentVer = parseVer(current);
+    int latestVer = parseVer(tag);
+
+    if (latestVer > currentVer)
+    {
+        m_updateAvailable = true;
+        m_latestVersion = std::wstring(tag.begin(), tag.end());
+        m_updateUrl = L"https://github.com/victor13452vic-png/zapret-gui-discord-youtube/releases/latest";
+
+        std::wstring msg = L"\u0414\u043E\u0441\u0442\u0443\u043F\u043D\u0430 \u043D\u043E\u0432\u0430\u044F \u0432\u0435\u0440\u0441\u0438\u044F: v" + m_latestVersion;
+        msg += L"\n\u0422\u0435\u043A\u0443\u0449\u0430\u044F: v";
+        msg += APP_VERSION;
+        msg += L"\n\n\u041E\u0442\u043A\u0440\u044B\u0442\u044C \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u0443 \u0437\u0430\u0433\u0440\u0443\u0437\u043A\u0438?";
+
+        int result = MessageBoxW(m_hWnd, msg.c_str(),
+            L"Zapret Gui - \u041E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u0435",
+            MB_ICONINFORMATION | MB_YESNO);
+
+        if (result == IDYES)
+        {
+            ShellExecuteW(nullptr, L"open", m_updateUrl.c_str(),
+                nullptr, nullptr, SW_SHOWNORMAL);
+        }
+    }
+    else if (!silent)
+    {
+        std::wstring msg = L"\u0423 \u0432\u0430\u0441 \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D\u0430 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u044F\u044F \u0432\u0435\u0440\u0441\u0438\u044F.\n\nv";
+        msg += APP_VERSION;
+        MessageBoxW(m_hWnd, msg.c_str(), L"Zapret Gui", MB_ICONINFORMATION);
+    }
+}
+
+std::wstring ZapretGUI::GetDnsServers(DnsMode mode)
+{
+    switch (mode)
+    {
+    case DnsMode::Cloudflare: return L"1.1.1.1,1.0.0.1";
+    case DnsMode::Google:     return L"8.8.8.8,8.8.4.4";
+    case DnsMode::Quad9:      return L"9.9.9.9,149.112.112.112";
+    case DnsMode::AdGuard:    return L"94.140.14.14,94.140.15.15";
+    case DnsMode::System:
+    default:                  return L"";
+    }
+}
+
+std::wstring ZapretGUI::GetDnsModeName(DnsMode mode)
+{
+    switch (mode)
+    {
+    case DnsMode::Cloudflare: return L"Cloudflare (1.1.1.1)";
+    case DnsMode::Google:     return L"Google (8.8.8.8)";
+    case DnsMode::Quad9:      return L"Quad9 (9.9.9.9)";
+    case DnsMode::AdGuard:    return L"AdGuard (94.140.14.14)";
+    case DnsMode::System:
+    default:                  return L"\u0421\u0438\u0441\u0442\u0435\u043C\u043D\u044B\u0439";
+    }
+}
+
+bool ZapretGUI::RunPowerShellCommand(const std::wstring& cmd)
+{
+    std::wstring fullCmd = L"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"" + cmd + L"\"";
+
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi = {};
+
+    std::vector<wchar_t> cmdBuf(fullCmd.begin(), fullCmd.end());
+    cmdBuf.push_back(0);
+
+    if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
+        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
+    {
+        WaitForSingleObject(pi.hProcess, 10000);
+
+        DWORD exitCode = 0;
+        GetExitCodeProcess(pi.hProcess, &exitCode);
+
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+
+        return exitCode == 0;
+    }
+
+    return false;
+}
+
+void ZapretGUI::ApplyDnsMode()
+{
+    if (m_settings.dnsMode == DnsMode::System)
+    {
+        RestoreSystemDns();
+        return;
+    }
+
+    std::wstring dnsServers = GetDnsServers(m_settings.dnsMode);
+    if (dnsServers.empty()) return;
+
+    size_t commaPos = dnsServers.find(L',');
+    std::wstring primary = dnsServers.substr(0, commaPos);
+    std::wstring secondary = (commaPos != std::wstring::npos)
+        ? dnsServers.substr(commaPos + 1) : L"";
+
+    std::wstring cmd =
+        L"Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { "
+        L"Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses ('"
+        + primary + L"','" + secondary + L"') -ErrorAction SilentlyContinue }";
+
+    if (!RunPowerShellCommand(cmd))
+    {
+        MessageBoxW(m_hWnd,
+            L"\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0442\u044C DNS.\n\u0417\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u0435 \u043F\u0440\u043E\u0433\u0440\u0430\u043C\u043C\u0443 \u043E\u0442 \u0438\u043C\u0435\u043D\u0438 \u0430\u0434\u043C\u0438\u043D\u0438\u0441\u0442\u0440\u0430\u0442\u043E\u0440\u0430.",
+            L"Zapret Gui", MB_ICONWARNING);
+        return;
+    }
+
+    cmd = L"Clear-DnsClientCache -ErrorAction SilentlyContinue";
+    RunPowerShellCommand(cmd);
+}
+
+void ZapretGUI::RestoreSystemDns()
+{
+    std::wstring cmd =
+        L"Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { "
+        L"Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses -ErrorAction SilentlyContinue }";
+
+    RunPowerShellCommand(cmd);
+
+    cmd = L"Clear-DnsClientCache -ErrorAction SilentlyContinue";
+    RunPowerShellCommand(cmd);
 }
